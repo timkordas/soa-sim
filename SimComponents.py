@@ -40,6 +40,7 @@ class Request(object):
         self.src = src
         self.completed = None #timestamp
         self.completion_cbs = [] # callback(s) for action at completion
+        self.completion_event = None
 
     def __repr__(self):
         return "id: {}, size: {}, time: {}, src: {} completed: {}".\
@@ -86,8 +87,9 @@ class RequestGenerator(object):
             # wait for next transmission
             yield self.env.timeout(self.adist())
             self.requests_sent += 1
-            p = Request(self.env.now, self.sdist(), self.requests_sent, src=self.id)
-            self.out.put(p)
+            req = Request(self.env.now, self.sdist(), self.requests_sent, src=self.id)
+            req.completion_event = self.env.event()
+            self.out.put(req)
 
 class RequestSink(object):
     """ Receives requests and collects delay information into the
@@ -139,6 +141,39 @@ class RequestSink(object):
             self.bytes_rec += pkt.size
             if self.debug:
                 print(pkt)
+
+class SynchronousForwarder(object):
+    """ Forwards requests one at a time, in order of receipt. each
+        forwarded request waits on completion.
+
+        Set the "out" member variable to the entity to receive the request.
+
+        Parameters
+        ----------
+        env : simpy.Environment
+            the simulation environment
+    """
+    def __init__(self, env, N=1, debug=False):
+        self.env = env
+        self.out = None
+        self.requests_rec = 0
+        self.slots = simpy.Resource(env, capacity=N)
+        self.debug = debug
+
+    def putAndWait(self, req, event):
+        slot = self.slots.request()
+        yield slot
+        self.out.put(req)
+        yield event
+        self.slots.release(slot)
+        return req
+
+    def put(self, req):
+        print("trying forwarding put")
+        self.requests_rec += 1
+        self.env.process(self.putAndWait(req, req.completion_event))
+        print("forwarded!")
+        return True
 
 class RequestCompleter(object):
     """ Completes requests one at a time, in order of receipt.
@@ -211,8 +246,8 @@ class RandomBrancher(object):
         self.outs[rand].put(req)
         self.out_stats[rand] += 1
 
-        def __repr__(self):
-            return "output stats by port " + str(out_stats)
+    def __repr__(self):
+        return "output stats by port " + str(out_stats)
 
 class PQueueBrancher(object):
     """ A demultiplexing element that chooses the output-channel based on the
@@ -257,4 +292,3 @@ class PQueueBrancher(object):
 
         def __repr__(self):
             return "output stats by port " + str(out_stats)
-
